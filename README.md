@@ -1,0 +1,27 @@
+# Hcaptcha Challenge Monitor
+
+Monitors a specific hcaptcha site key for new prompts. This can be useful for people running ai solvers as it notifies them when to update their ai "trained" solver.
+
+## Setup
+
+```bash
+pip install -r requirements.txt
+copy config.example.json config.json
+```
+
+Put your sitekey + webhook in `config.json`. You need Chrome installed.
+
+## Usage
+
+```bash
+python monitor.py
+```
+
+Records the first few prompts as a baseline, then pings discord on anything new. Some sites may only have 2 prompts but sometimes i've seen up to 4 at once. 
+
+Debugging port defaults to `9331`. Override with `HCAPTCHA_MONITOR_PORT` if you need to.
+
+Sends discord webhook like the following:
+
+
+<img width="378" height="458" alt="image" src="https://github.com/user-attachments/assets/c7a35fd3-d95c-4061-b605-d6666fdba8d4" />
