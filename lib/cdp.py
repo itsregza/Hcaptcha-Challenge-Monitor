@@ -41,14 +41,25 @@ def cdp_alive(host: str, port: int, timeout: float = 0.28) -> bool:
         return False
 
 
-def find_demo_page(targets: list[dict]) -> Optional[dict]:
+def find_captcha_page(targets: list[dict]) -> Optional[dict]:
     for t in targets:
         if not isinstance(t, dict):
             continue
+        if not t.get("webSocketDebuggerUrl"):
+            continue
         u = (t.get("url") or "").lower()
-        if "accounts.hcaptcha.com/demo" in u and t.get("webSocketDebuggerUrl"):
+        title = (t.get("title") or "").lower()
+        if "captcha.html" in u:
+            return t
+        if "accounts.hcaptcha.com/demo" in u:
+            return t
+        if "hcaptcha monitor" in title:
             return t
     return None
+
+
+# back-compat for older imports
+find_demo_page = find_captcha_page
 
 
 class CdpSession:

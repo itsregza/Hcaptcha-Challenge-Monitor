@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>hCaptcha monitor</title>
+  <style>
+    body { margin: 0; font-family: system-ui, sans-serif; background: #0b0b0e; color: #eee; }
+    .wrap { padding: 16px; }
+    h1 { font-size: 16px; margin: 0 0 8px; font-weight: 600; }
+    p { margin: 0 0 12px; color: #999; font-size: 13px; }
+    button {
+      background: #1f1f26; color: #eee; border: 1px solid #333; padding: 8px 12px;
+      border-radius: 6px; cursor: pointer;
+    }
+    button:disabled { opacity: 0.5; }
+    #slot { margin-top: 16px; min-height: 80px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>hCaptcha challenge monitor</h1>
+    <p>Challenge should open on its own. Use the button if it stalls.</p>
+    <button type="button" id="test-btn">Open challenge</button>
+    <div id="slot"></div>
+  </div>
+  <script>
+(function () {
+  var params = new URLSearchParams(window.location.search || "");
+  var sitekey = (params.get("sitekey") || "").trim();
+  var btn = document.getElementById("test-btn");
+  var slot = document.getElementById("slot");
+  var widgetId = null;
+
+  function openChallenge(id, container) {
+    if (id == null || !window.hcaptcha || typeof hcaptcha.execute !== "function") return;
+    function clickFrame() {
+      if (!container) return false;
+      var frame = container.querySelector('iframe[src*="hcaptcha"]');
+      if (!frame) return false;
+      try {
+        frame.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+        frame.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+        frame.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+    function tryOpen(left) {
+      var ok = false;
+      try { hcaptcha.execute(id); ok = true; } catch (e) { ok = false; }
+      if (!ok) clickFrame();
+      if (!ok && left > 0) setTimeout(function () { tryOpen(left - 1); }, 300);
+    }
+    tryOpen(24);
+  }
+
+  function mount() {
+    if (!sitekey || !window.hcaptcha || !slot) return;
+    if (widgetId !== null) {
+      try { hcaptcha.remove(widgetId); } catch (e) {}
+      widgetId = null;
+    }
+    slot.innerHTML = "";
+    widgetId = hcaptcha.render(slot, {
+      sitekey: sitekey,
+      theme: "dark",
+      size: "invisible",
+      callback: function () {},
+      "expired-callback": function () {},
+      "error-callback": function (err) { console.warn("hcaptcha error", err); }
+    });
+    openChallenge(widgetId, slot);
+  }
+
+  function boot() {
+    if (!sitekey) {
+      document.querySelector("p").textContent = "missing ?sitekey= in url";
+      return;
+    }
+    if (btn) btn.addEventListener("click", mount);
+    if (window.hcaptcha) {
+      mount();
+      return;
+    }
+    window.onHcaptchaReady = function () { mount(); };
+    var s = document.createElement("script");
+    s.src = "https://js.hcaptcha.com/1/api.js?onload=onHcaptchaReady&render=explicit&hl=en";
+    s.async = true;
+    s.defer = true;
+    document.head.appendChild(s);
+  }
+
+  boot();
+})();
+  </script>
+</body>
+</html>

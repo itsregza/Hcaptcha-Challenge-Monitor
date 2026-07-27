@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import http.server
 import json
 import os
+import socket
+import socketserver
 import subprocess
 import tempfile
 import threading
@@ -12,7 +15,7 @@ from urllib.parse import quote
 from lib.cdp import (
     attach_to_target,
     cdp_alive,
-    find_demo_page,
+    find_captcha_page,
     list_targets,
     wait_for_cdp,
 )
@@ -26,15 +29,11 @@ CDP_PORT = 9331
 SEED = 5
 DELAY = 3.0
 
-
-CLICK_CHECKBOX = """
+CLICK_TEST = """
 (function(){
-  var el = document.querySelector('#checkbox')
-    || document.querySelector('[role="checkbox"]')
-    || document.querySelector('.check');
-  if (!el) return false;
-  el.click();
-  return true;
+  var b = document.getElementById('test-btn');
+  if (b) { b.click(); return true; }
+  return false;
 })()
 """
 
@@ -75,12 +74,36 @@ PROMPT_JS = """
 
 def load_config():
     if not os.path.isfile(CONFIG_PATH):
-        raise FileNotFoundError("no config.json (copy from config.example.json)")
+        raise FileNotFoundError("no config.json")
     with open(CONFIG_PATH, encoding="utf-8") as f:
         data = json.load(f)
     sitekey = str((data or {}).get("sitekey") or "").strip()
     webhook = str((data or {}).get("webhook") or "").strip()
     return sitekey, webhook
+
+
+def free_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    p = int(s.getsockname()[1])
+    s.close()
+    return p
+
+
+def serve_static(folder):
+    port = free_port()
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *_a):
+            return
+
+    httpd = socketserver.TCPServer(("127.0.0.1", port), Handler)
+    httpd.allow_reuse_address = True
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, port
 
 
 def chrome_path():
@@ -130,7 +153,7 @@ def page_shot(port):
     import base64
 
     try:
-        page = find_demo_page(list_targets(port))
+        page = find_captcha_page(list_targets(port))
         if not page:
             return b""
         s = attach_to_target(page)
@@ -145,26 +168,24 @@ def page_shot(port):
         return b""
 
 
-def open_challenge(port):
+def kick(port):
     try:
-        for t in list_targets(port):
-            u = (t.get("url") or "").lower()
-            if "frame=checkbox" not in u or not t.get("webSocketDebuggerUrl"):
-                continue
-            s = attach_to_target(t)
-            try:
-                s.send("Runtime.enable", timeout=10)
-                s.send(
-                    "Runtime.evaluate",
-                    {"expression": CLICK_CHECKBOX, "returnByValue": True},
-                    timeout=10,
-                )
-                return True
-            finally:
-                s.close()
+        page = find_captcha_page(list_targets(port))
+        if not page:
+            return False
+        s = attach_to_target(page)
+        try:
+            s.send("Runtime.enable", timeout=10)
+            s.send(
+                "Runtime.evaluate",
+                {"expression": CLICK_TEST, "returnByValue": True},
+                timeout=10,
+            )
+            return True
+        finally:
+            s.close()
     except Exception:
-        pass
-    return False
+        return False
 
 
 def prompt_from_snap(ins, snap):
@@ -251,7 +272,7 @@ def watch(port, sitekey, webhook, stop):
     seen = set()
     n = 0
     last = ""
-    last_open = 0.0
+    last_kick = 0.0
     print(f"[monitor] watching sitekey={sitekey}", flush=True)
 
     while not stop.is_set():
@@ -259,9 +280,9 @@ def watch(port, sitekey, webhook, stop):
             time.sleep(0.8)
             continue
 
-        if time.time() - last_open > 20:
-            open_challenge(port)
-            last_open = time.time()
+        if time.time() - last_kick > 20:
+            kick(port)
+            last_kick = time.time()
 
         try:
             prompt, png = read_stable(port, avoid=last)
@@ -271,8 +292,8 @@ def watch(port, sitekey, webhook, stop):
             continue
 
         if not prompt:
-            open_challenge(port)
-            last_open = time.time()
+            kick(port)
+            last_kick = time.time()
             time.sleep(DELAY)
             continue
 
@@ -307,7 +328,8 @@ def launch_chrome(url, port):
             "--remote-allow-origins=*",
             "--no-first-run",
             "--no-default-browser-check",
-            url,
+            f"--app={url}",
+            f"--window-size=520,640",
         ]
     )
 
@@ -325,16 +347,21 @@ def main():
         print("that webhook url doesnt look like discord")
         return 1
 
+    if not os.path.isfile(os.path.join(ROOT, "captcha.html")):
+        print("missing captcha.html")
+        return 2
+
+    httpd, http_port = serve_static(ROOT)
+    url = f"http://127.0.0.1:{http_port}/captcha.html?sitekey={quote(sitekey)}"
     port = int(os.environ.get("HCAPTCHA_MONITOR_PORT") or CDP_PORT)
-    url = f"https://accounts.hcaptcha.com/demo?sitekey={quote(sitekey)}"
     proc = launch_chrome(url, port)
     stop = threading.Event()
     try:
         wait_for_cdp(port=port, timeout=45.0)
-        time.sleep(3.0)
+        time.sleep(3.5)
         threading.Thread(target=watch, args=(port, sitekey, webhook, stop), daemon=True).start()
-        print(f"[monitor] opened {url}", flush=True)
-        print("[monitor] click the checkbox if nothing pops up", flush=True)
+        print(f"[monitor] captcha window -> {url}", flush=True)
+        print("[monitor] hit Open challenge if nothing pops", flush=True)
         proc.wait()
         return 0
     except KeyboardInterrupt:
@@ -343,6 +370,10 @@ def main():
         stop.set()
         try:
             proc.terminate()
+        except Exception:
+            pass
+        try:
+            httpd.shutdown()
         except Exception:
             pass
 
