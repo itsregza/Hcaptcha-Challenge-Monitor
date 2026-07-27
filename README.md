@@ -6,7 +6,6 @@ Monitors a specific hcaptcha site key for new prompts. This can be useful for pe
 
 ```bash
 pip install -r requirements.txt
-copy config.example.json config.json
 ```
 
 Put your sitekey + webhook in `config.json`. You need Chrome installed.
