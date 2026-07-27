@@ -24,4 +24,4 @@ Debugging port defaults to `9331`. Override with `HCAPTCHA_MONITOR_PORT` if you 
 Sends discord webhook like the following:
 
 
-<img width="378" height="458" alt="image" src="https://github.com/user-attachments/assets/c7a35fd3-d95c-4061-b605-d6666fdba8d4" />
+<img width="365" height="441" alt="image" src="https://github.com/user-attachments/assets/2af21a29-b7b7-4c57-a264-84350ac8dccc" />
