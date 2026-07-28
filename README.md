@@ -22,6 +22,14 @@ Records the first few prompts as a baseline, then pings discord on anything new.
 
 Debugging port defaults to `9331`. Override with `HCAPTCHA_MONITOR_PORT` if you need to.
 
+## Config json
+```
+sitekey - hcaptcha site key eg dd6e16a7-972e-47d2-93d0-96642fb6d8de
+webhook - discord webhook for notification
+delay - seconds between each challenge refresh. Default 5s
+seed_seconds - number of seconds the script will run to detect all possible prompts. After this time all new prompts get sent to webhook
+```
+
 Sends discord webhook like the following:
 
 
