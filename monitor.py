@@ -6,6 +6,7 @@ import os
 import socket
 import socketserver
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -22,7 +23,14 @@ from lib.cdp import (
 from lib.challenge import list_jobs
 from lib.scrape import prompt_from_texts, prompt_is_challenge, snap_ready
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+
+def app_dir():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+ROOT = app_dir()
 CONFIG_PATH = os.path.join(ROOT, "config.json")
 
 CDP_PORT = 9331
@@ -74,7 +82,7 @@ PROMPT_JS = """
 
 def load_config():
     if not os.path.isfile(CONFIG_PATH):
-        raise FileNotFoundError("no config.json")
+        raise FileNotFoundError(f"no config.json next to the exe ({CONFIG_PATH})")
     with open(CONFIG_PATH, encoding="utf-8") as f:
         data = json.load(f)
     sitekey = str((data or {}).get("sitekey") or "").strip()
