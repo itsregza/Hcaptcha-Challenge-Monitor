@@ -13,8 +13,14 @@ import websocket
 
 
 def list_targets(port: int, host: str = "127.0.0.1") -> list[dict]:
-    with urlopen(f"http://{host}:{port}/json", timeout=5) as r:
-        return json.loads(r.read().decode("utf-8"))
+    last = None
+    for path in ("/json/list", "/json"):
+        try:
+            with urlopen(f"http://{host}:{port}{path}", timeout=2.5) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except (URLError, OSError, json.JSONDecodeError) as e:
+            last = e
+    raise last if last else RuntimeError("list_targets failed")
 
 
 def wait_for_cdp(port: int, host: str = "127.0.0.1", timeout: float = 20.0) -> list[dict]:
@@ -42,6 +48,7 @@ def cdp_alive(host: str, port: int, timeout: float = 0.28) -> bool:
 
 
 def find_captcha_page(targets: list[dict]) -> Optional[dict]:
+    ranked = []
     for t in targets:
         if not isinstance(t, dict):
             continue
@@ -49,13 +56,26 @@ def find_captcha_page(targets: list[dict]) -> Optional[dict]:
             continue
         u = (t.get("url") or "").lower()
         title = (t.get("title") or "").lower()
+        typ = (t.get("type") or "").lower()
+        if typ in ("service_worker", "worker", "shared_worker"):
+            continue
+        score = 0
         if "captcha.html" in u:
-            return t
-        if "accounts.hcaptcha.com/demo" in u:
-            return t
+            score += 50
         if "hcaptcha monitor" in title:
-            return t
-    return None
+            score += 40
+        if "accounts.hcaptcha.com/demo" in u:
+            score += 30
+        if "127.0.0.1" in u or "localhost" in u:
+            score += 5
+        if typ in ("page", "app"):
+            score += 2
+        if score:
+            ranked.append((score, t))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    return ranked[0][1]
 
 
 # back-compat for older imports
@@ -63,7 +83,7 @@ find_demo_page = find_captcha_page
 
 
 class CdpSession:
-    def __init__(self, ws_url: str, recv_timeout: float = 30.0):
+    def __init__(self, ws_url: str, recv_timeout: float = 6.0):
         self._ws_url = ws_url
         self._recv_timeout = recv_timeout
         self._ws = None
@@ -115,7 +135,7 @@ class CdpSession:
             except queue.Empty:
                 continue
 
-    def send(self, method: str, params: Optional[dict] = None, timeout: float = 10.0) -> dict[str, Any]:
+    def send(self, method: str, params: Optional[dict] = None, timeout: float = 6.0) -> dict[str, Any]:
         if self._ws is None:
             raise RuntimeError("not connected")
         with self._state_lock:
@@ -142,6 +162,6 @@ def attach_to_target(target: dict) -> CdpSession:
     ws_url = target.get("webSocketDebuggerUrl")
     if not ws_url:
         raise RuntimeError("no websocket url")
-    s = CdpSession(ws_url)
+    s = CdpSession(ws_url, recv_timeout=6.0)
     s.connect()
     return s

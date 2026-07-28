@@ -93,12 +93,14 @@ def challenge_oopifs(targets: list[dict]) -> list[dict]:
     for t in targets:
         if not isinstance(t, dict):
             continue
-        u = (t.get("url") or "").lower()
-        if CHALLENGE not in u:
-            continue
         if not t.get("webSocketDebuggerUrl"):
             continue
-        out.append(t)
+        u = (t.get("url") or "").lower()
+        if CHALLENGE in u:
+            out.append(t)
+            continue
+        if "hcaptcha.com" in u and "challenge" in u and "checkbox" not in u:
+            out.append(t)
     return out
 
 
@@ -125,8 +127,8 @@ class Frame:
     @classmethod
     def from_oopif(cls, target: dict):
         s = attach_to_target(target)
-        s.send("Page.enable", timeout=20)
-        s.send("Runtime.enable", timeout=20)
+        s.send("Page.enable", timeout=8)
+        s.send("Runtime.enable", timeout=8)
         return cls(s, boot_href=(target.get("url") or "").strip())
 
     def _ctx_id(self):
@@ -140,7 +142,7 @@ class Frame:
                     "worldName": "hcaptcha-monitor",
                     "grantUniveralAccess": True,
                 },
-                timeout=20,
+                timeout=8,
             )
             self._ctx = int(r["executionContextId"])
         return self._ctx
@@ -154,7 +156,7 @@ class Frame:
         ctx = self._ctx_id()
         if ctx is not None:
             params["contextId"] = ctx
-        r = self._sess.send("Runtime.evaluate", params, timeout=45)
+        r = self._sess.send("Runtime.evaluate", params, timeout=8)
         res = r.get("result") or {}
         if res.get("subtype") == "error" or "exceptionDetails" in res:
             return {}
@@ -170,7 +172,7 @@ class Frame:
             loc["href"] = self._boot
         return out
 
-    def run_js(self, expr: str, timeout: float = 15.0):
+    def run_js(self, expr: str, timeout: float = 6.0):
         params = {"expression": expr, "returnByValue": True, "awaitPromise": False}
         ctx = self._ctx_id()
         if ctx is not None:
@@ -178,11 +180,28 @@ class Frame:
         r = self._sess.send("Runtime.evaluate", params, timeout=timeout)
         return (r.get("result") or {}).get("value")
 
+    def click_xy(self, x: float, y: float) -> None:
+        for typ, buttons in (
+            ("mouseMoved", 0),
+            ("mousePressed", 1),
+            ("mouseReleased", 0),
+        ):
+            params = {
+                "type": typ,
+                "x": float(x),
+                "y": float(y),
+                "button": "left" if typ != "mouseMoved" else "none",
+                "clickCount": 1,
+            }
+            if typ != "mouseMoved":
+                params["buttons"] = buttons
+            self._sess.send("Input.dispatchMouseEvent", params, timeout=2)
+
     def shot_png(self) -> bytes:
         import base64
 
         try:
-            r = self._sess.send("Page.captureScreenshot", {"format": "png"}, timeout=15)
+            r = self._sess.send("Page.captureScreenshot", {"format": "png"}, timeout=6)
         except Exception:
             return b""
         raw = r.get("data") or ""
@@ -202,7 +221,8 @@ def list_jobs(port: int) -> list[tuple[str, Frame]]:
         return []
 
     jobs = []
-    for ch in challenge_oopifs(targets):
+    oopifs = list(reversed(challenge_oopifs(targets)))
+    for ch in oopifs[:2]:
         tid = str(ch.get("id") or ch.get("url") or "")
         try:
             jobs.append((f"{port}:oopif:{tid}", Frame.from_oopif(ch)))
@@ -217,14 +237,15 @@ def list_jobs(port: int) -> list[tuple[str, Frame]]:
     s = None
     try:
         s = attach_to_target(page)
-        s.send("Page.enable", timeout=20)
-        s.send("Runtime.enable", timeout=20)
-        tree = s.send("Page.getFrameTree", timeout=20)
-        for fid, furl in challenge_frames(tree.get("frameTree") or {}):
+        s.send("Page.enable", timeout=8)
+        s.send("Runtime.enable", timeout=8)
+        tree = s.send("Page.getFrameTree", timeout=8)
+        frames = list(reversed(challenge_frames(tree.get("frameTree") or {})))
+        for fid, furl in frames[:2]:
             try:
                 sess = attach_to_target(page)
-                sess.send("Page.enable", timeout=20)
-                sess.send("Runtime.enable", timeout=20)
+                sess.send("Page.enable", timeout=8)
+                sess.send("Runtime.enable", timeout=8)
                 jobs.append((f"{port}:frame:{fid}", Frame(sess, frame_id=fid, boot_href=furl)))
             except Exception:
                 continue

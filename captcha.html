@@ -47,18 +47,18 @@
         return false;
       }
     }
-    function tryOpen(left) {
-      var ok = false;
-      try { hcaptcha.execute(id); ok = true; } catch (e) { ok = false; }
-      if (!ok) clickFrame();
-      if (!ok && left > 0) setTimeout(function () { tryOpen(left - 1); }, 300);
+    try { hcaptcha.execute(id); } catch (e) {}
+    function tryClick(left) {
+      clickFrame();
+      if (left > 0) setTimeout(function () { tryClick(left - 1); }, 400);
     }
-    tryOpen(24);
+    tryClick(16);
   }
 
   function mount() {
     if (!sitekey || !window.hcaptcha || !slot) return;
     if (widgetId !== null) {
+      try { hcaptcha.reset(widgetId); } catch (e) {}
       try { hcaptcha.remove(widgetId); } catch (e) {}
       widgetId = null;
     }
@@ -68,7 +68,9 @@
       theme: "dark",
       size: "invisible",
       callback: function () {},
-      "expired-callback": function () {},
+      "expired-callback": function () {
+        setTimeout(function () { openChallenge(widgetId, slot); }, 400);
+      },
       "error-callback": function (err) { console.warn("hcaptcha error", err); }
     });
     openChallenge(widgetId, slot);

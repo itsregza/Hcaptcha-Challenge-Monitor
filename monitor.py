@@ -34,7 +34,7 @@ ROOT = app_dir()
 CONFIG_PATH = os.path.join(ROOT, "config.json")
 
 CDP_PORT = 9331
-SEED = 5
+SEED_SECONDS = 90.0
 DELAY = 3.0
 
 CLICK_TEST = """
@@ -47,22 +47,63 @@ CLICK_TEST = """
 
 CLICK_SKIP = """
 (function(){
-  function t(el){
+  function info(el){
     return String(
       (el.getAttribute('aria-label')||'')+' '+
       (el.getAttribute('title')||'')+' '+
+      (el.id||'')+' '+
+      (el.className||'')+' '+
       (el.innerText||el.textContent||'')
     ).toLowerCase();
   }
-  var nodes = document.querySelectorAll('button,div[role="button"],.button,a,[class*="refresh"]');
-  for (var i=0;i<nodes.length;i++){
-    var s = t(nodes[i]);
-    if (s.indexOf('skip')!==-1 || s.indexOf('refresh')!==-1){
-      nodes[i].click();
-      return true;
-    }
+  function rect(el){
+    var r = el.getBoundingClientRect();
+    return { x: r.left + r.width/2, y: r.top + r.height/2, w: r.width, h: r.height };
   }
-  return false;
+  function press(el){
+    try { el.scrollIntoView({block:'center', inline:'center'}); } catch (e) {}
+    try { el.focus(); } catch (e2) {}
+    try { el.click(); } catch (e3) {}
+    try {
+      el.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, cancelable:true}));
+      el.dispatchEvent(new PointerEvent('pointerup', {bubbles:true, cancelable:true}));
+    } catch (e4) {}
+    try {
+      el.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
+      el.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
+      el.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+    } catch (e5) {}
+  }
+  var sels = [
+    '.refresh',
+    '[class*="refresh"]',
+    '[class*="skip"]',
+    'button[aria-label*="Skip" i]',
+    'button[aria-label*="Refresh" i]',
+    '[title*="Skip" i]',
+    '[title*="Refresh" i]',
+    '[aria-label*="Get a new challenge" i]'
+  ];
+  for (var i=0;i<sels.length;i++){
+    try {
+      var el = document.querySelector(sels[i]);
+      if (!el) continue;
+      var r = rect(el);
+      if (r.w < 6 || r.h < 6) continue;
+      press(el);
+      return { ok: true, x: r.x, y: r.y, w: r.w, h: r.h };
+    } catch (e) {}
+  }
+  var nodes = document.querySelectorAll('div,button,a,span');
+  for (var j=0;j<nodes.length;j++){
+    var s = info(nodes[j]);
+    if (s.indexOf('refresh') === -1 && s.indexOf('skip') === -1 && s.indexOf('new challenge') === -1) continue;
+    var rr = rect(nodes[j]);
+    if (rr.w < 6 || rr.h < 6 || rr.w > 140 || rr.h > 140) continue;
+    press(nodes[j]);
+    return { ok: true, x: rr.x, y: rr.y, w: rr.w, h: rr.h };
+  }
+  return null;
 })()
 """
 
@@ -87,7 +128,19 @@ def load_config():
         data = json.load(f)
     sitekey = str((data or {}).get("sitekey") or "").strip()
     webhook = str((data or {}).get("webhook") or "").strip()
-    return sitekey, webhook
+    try:
+        delay = float((data or {}).get("delay", DELAY))
+    except (TypeError, ValueError):
+        delay = DELAY
+    if delay < 0:
+        delay = 0.0
+    try:
+        seed_seconds = float((data or {}).get("seed_seconds", SEED_SECONDS))
+    except (TypeError, ValueError):
+        seed_seconds = SEED_SECONDS
+    if seed_seconds < 0:
+        seed_seconds = 0.0
+    return sitekey, webhook, delay, seed_seconds
 
 
 def free_port():
@@ -166,8 +219,8 @@ def page_shot(port):
             return b""
         s = attach_to_target(page)
         try:
-            s.send("Page.enable", timeout=10)
-            r = s.send("Page.captureScreenshot", {"format": "png"}, timeout=15)
+            s.send("Page.enable", timeout=5)
+            r = s.send("Page.captureScreenshot", {"format": "png"}, timeout=6)
             raw = r.get("data") or ""
             return base64.b64decode(raw) if raw else b""
         finally:
@@ -183,12 +236,28 @@ def kick(port):
             return False
         s = attach_to_target(page)
         try:
-            s.send("Runtime.enable", timeout=10)
-            s.send(
+            s.send("Runtime.enable", timeout=5)
+            r = s.send(
                 "Runtime.evaluate",
                 {"expression": CLICK_TEST, "returnByValue": True},
-                timeout=10,
+                timeout=5,
             )
+            return bool((r.get("result") or {}).get("value"))
+        finally:
+            s.close()
+    except Exception:
+        return False
+
+
+def reload_captcha(port):
+    try:
+        page = find_captcha_page(list_targets(port))
+        if not page:
+            return False
+        s = attach_to_target(page)
+        try:
+            s.send("Page.enable", timeout=5)
+            s.send("Page.reload", {"ignoreCache": True}, timeout=8)
             return True
         finally:
             s.close()
@@ -206,123 +275,277 @@ def prompt_from_snap(ins, snap):
     return prompt_from_texts(snap.get("texts") or [])
 
 
+def _close_jobs(jobs):
+    for _, x in jobs:
+        try:
+            x.close()
+        except Exception:
+            pass
+
+
+def pick_ready(jobs):
+    for _, ins in jobs:
+        try:
+            snap = ins.snap()
+        except Exception:
+            continue
+        if snap_ready(snap):
+            return ins, snap
+    return None, None
+
+
 def read_stable(port, avoid=""):
-    jobs = list_jobs(port)
-    if not jobs:
-        return "", b""
-    _, ins = jobs[0]
+    end = time.time() + 12
+    last = ""
+    same = 0
+    jobs = []
+    ins = None
+    snap = None
+    stale = 0
+    next_beat = time.time() + 3
     try:
-        end = time.time() + 18
-        last = ""
-        same = 0
         while time.time() < end:
-            try:
-                snap = ins.snap()
-            except Exception:
-                time.sleep(0.35)
+            if time.time() >= next_beat:
+                print("[monitor] still reading challenge frame...", flush=True)
+                next_beat = time.time() + 3
+            if ins is None:
+                _close_jobs(jobs)
+                jobs = list_jobs(port)
+                if not jobs:
+                    time.sleep(0.35)
+                    continue
+                ins, snap = pick_ready(jobs)
+                if ins is None:
+                    ins = jobs[0][1]
+                    snap = None
+                stale = 0
+            if snap is None:
+                try:
+                    snap = ins.snap()
+                except Exception:
+                    _close_jobs(jobs)
+                    jobs = []
+                    ins = None
+                    time.sleep(0.25)
+                    continue
+            if not snap_ready(snap):
+                snap = None
+                stale += 1
+                if stale >= 6:
+                    ins = None
+                time.sleep(0.25)
                 continue
-            href = ((snap.get("loc") or {}).get("href") or "").lower()
-            if "frame=challenge" not in href or not snap_ready(snap):
-                time.sleep(0.35)
-                continue
+            stale = 0
             prompt = prompt_from_snap(ins, snap)
+            snap = None
             if not prompt_is_challenge(prompt):
                 same = 0
                 last = ""
-                time.sleep(0.35)
+                time.sleep(0.25)
                 continue
             if avoid and prompt == avoid:
                 try:
-                    ins.run_js(CLICK_SKIP)
+                    spot = ins.run_js(CLICK_SKIP)
+                    if isinstance(spot, dict) and spot.get("x") is not None:
+                        ins.click_xy(float(spot["x"]), float(spot["y"]))
                 except Exception:
                     pass
-                time.sleep(1.2)
+                _close_jobs(jobs)
+                jobs = []
+                ins = None
                 same = 0
                 last = ""
+                time.sleep(0.9)
                 continue
             if prompt == last:
                 same += 1
             else:
                 last = prompt
                 same = 1
-            if same >= 3:
+            if same >= 1:
                 png = b""
                 try:
                     png = ins.shot_png()
                 except Exception:
                     pass
-                if not png:
-                    png = page_shot(port)
                 return prompt, png
-            time.sleep(0.4)
+            time.sleep(0.2)
         return "", b""
     finally:
-        for _, x in jobs:
-            try:
-                x.close()
-            except Exception:
-                pass
+        _close_jobs(jobs)
+
+
+def dump_targets(port):
+    try:
+        ts = list_targets(port)
+    except Exception as e:
+        print(f"[monitor] cant list targets: {e}", flush=True)
+        return
+    print(f"[monitor] {len(ts)} cdp targets", flush=True)
+    for t in ts[:15]:
+        u = (t.get("url") or "")[:140]
+        print(f"[monitor]  {t.get('type')}: {u}", flush=True)
 
 
 def skip_current(port):
-    for _, ins in list_jobs(port):
-        try:
-            ins.run_js(CLICK_SKIP)
-        except Exception:
-            pass
-        try:
-            ins.close()
-        except Exception:
-            pass
+    jobs = list_jobs(port)
+    ok = False
+    try:
+        for _, ins in jobs:
+            try:
+                spot = ins.run_js(CLICK_SKIP)
+            except Exception as e:
+                print(f"[monitor] skip js fail: {e}", flush=True)
+                spot = None
+            if isinstance(spot, dict) and spot.get("ok"):
+                ok = True
+                #print(f"[monitor] skip click {float(spot.get('x') or 0):.0f},{float(spot.get('y') or 0):.0f}",flush=True,)
+                try:
+                    ins.click_xy(float(spot["x"]), float(spot["y"]))
+                except Exception:
+                    pass
+            else:
+                print("[monitor] skip button not found in frame", flush=True)
+    finally:
+        _close_jobs(jobs)
+    return ok
 
 
-def watch(port, sitekey, webhook, stop):
+def advance(port, prev, delay=DELAY):
+    wait = delay if delay > 0 else 1.2
+    for i in range(4):
+        skip_current(port)
+        time.sleep(1.2)
+        jobs = list_jobs(port)
+        try:
+            if not jobs:
+                print(f"[monitor] after skip: no frame (try {i+1})", flush=True)
+            else:
+                ins, snap = pick_ready(jobs)
+                if ins is None:
+                    ins, snap = jobs[0][1], {}
+                prompt = ""
+                if snap_ready(snap):
+                    prompt = prompt_from_snap(ins, snap)
+                if prompt_is_challenge(prompt) and prompt != prev:
+                    print("[monitor] got next challenge after skip", flush=True)
+                    return prompt
+                if prompt_is_challenge(prompt) and prompt == prev:
+                    print(f"[monitor] known: {prompt[:100]}", flush=True)
+                else:
+                    print(f"[monitor] no usable challenge yet (try {i+1})", flush=True)
+        finally:
+            _close_jobs(jobs)
+        if i < 3:
+            print(f"[monitor] waiting {wait}s before next skip", flush=True)
+            time.sleep(wait)
+    print("[monitor] skip stuck, remounting", flush=True)
+    kick(port)
+    time.sleep(max(2.5, wait))
+    kick(port)
+    time.sleep(2.0)
+    return ""
+
+
+def watch(port, sitekey, webhook, stop, delay=DELAY, seed_seconds=SEED_SECONDS):
     seen = set()
-    n = 0
+    seeding = seed_seconds > 0
+    seed_until = time.time() + seed_seconds
+    seed_count = 0
     last = ""
-    last_kick = 0.0
-    print(f"[monitor] watching sitekey={sitekey}", flush=True)
+    empty = 0
+    pending = ""
+    last_cdp_warn = 0.0
+    print(f"[monitor] watching sitekey={sitekey} cdp={port} delay={delay}s", flush=True)
+    kick(port)
 
     while not stop.is_set():
         if not cdp_alive("127.0.0.1", port):
+            now = time.time()
+            if now - last_cdp_warn > 5:
+                print(f"[monitor] chrome debug port {port} not responding", flush=True)
+                last_cdp_warn = now
             time.sleep(0.8)
             continue
 
-        if time.time() - last_kick > 20:
-            kick(port)
-            last_kick = time.time()
-
-        try:
-            prompt, png = read_stable(port, avoid=last)
-        except Exception as e:
-            print(f"[monitor] {e}", flush=True)
-            time.sleep(DELAY)
-            continue
+        png = b""
+        if pending:
+            prompt = pending
+            pending = ""
+        else:
+            try:
+                prompt, png = read_stable(port, avoid=last)
+            except Exception as e:
+                print(f"[monitor] {e}", flush=True)
+                time.sleep(DELAY)
+                continue
 
         if not prompt:
-            kick(port)
-            last_kick = time.time()
+            empty += 1
+            print(f"[monitor] no challenge, retry {empty}", flush=True)
+            if empty == 1 or empty % 2 == 0:
+                dump_targets(port)
+            if last:
+                print(f"[monitor] waiting {delay}s before retry skip", flush=True)
+                if delay > 0:
+                    time.sleep(delay)
+                nxt = advance(port, last, delay=delay)
+                if nxt:
+                    pending = nxt
+                    empty = 0
+                    continue
+            elif empty >= 2:
+                kick(port)
+            if empty >= 5:
+                print("[monitor] reloading page", flush=True)
+                reload_captcha(port)
+                empty = 0
+                time.sleep(3.0)
+                kick(port)
             time.sleep(DELAY)
             continue
 
-        last = prompt
-        n += 1
+        empty = 0
+        if not prompt_is_challenge(prompt):
+            print(f"[monitor] ignoring non-challenge text: {prompt[:80]}", flush=True)
+            if delay > 0:
+                time.sleep(delay)
+            skip_current(port)
+            continue
+
+        if seeding and time.time() >= seed_until:
+            seeding = False
+            print(f"[monitor] seed window done ({seed_count} known), watching for new challenges", flush=True)
 
         if prompt not in seen:
             seen.add(prompt)
-            if n <= SEED:
-                print(f"[monitor] seed {n}/{SEED}: {prompt[:100]}", flush=True)
+            if seeding:
+                seed_count += 1
+                print(f"[monitor] seed {seed_count}: {prompt[:100]}", flush=True)
             else:
                 print(f"[monitor] new: {prompt[:100]}", flush=True)
+                if not png:
+                    jobs = []
+                    try:
+                        jobs = list_jobs(port)
+                        if jobs:
+                            png = jobs[0][1].shot_png()
+                    except Exception:
+                        png = b""
+                    finally:
+                        _close_jobs(jobs)
                 ping(webhook, sitekey, prompt, png)
         else:
             print(f"[monitor] known: {prompt[:100]}", flush=True)
 
-        if n == SEED:
-            print("[monitor] seeded, watching for new challenges", flush=True)
-
-        skip_current(port)
-        time.sleep(DELAY)
+        last = prompt
+        if delay > 0:
+            print(f"[monitor] waiting {delay}s", flush=True)
+            time.sleep(delay)
+        #print("[monitor] skipping to next", flush=True)
+        nxt = advance(port, last, delay=delay)
+        if nxt:
+            pending = nxt
 
 
 def launch_chrome(url, port):
@@ -333,18 +556,20 @@ def launch_chrome(url, port):
             exe,
             f"--user-data-dir={profile}",
             f"--remote-debugging-port={port}",
+            "--remote-debugging-address=127.0.0.1",
             "--remote-allow-origins=*",
             "--no-first-run",
             "--no-default-browser-check",
+            "--disable-background-networking",
             f"--app={url}",
-            f"--window-size=520,640",
+            "--window-size=520,640",
         ]
     )
 
 
 def main():
     try:
-        sitekey, webhook = load_config()
+        sitekey, webhook, delay, seed_seconds = load_config()
     except (OSError, ValueError, json.JSONDecodeError) as e:
         print(f"bad config: {e}")
         return 1
@@ -361,14 +586,23 @@ def main():
 
     httpd, http_port = serve_static(ROOT)
     url = f"http://127.0.0.1:{http_port}/captcha.html?sitekey={quote(sitekey)}"
-    port = int(os.environ.get("HCAPTCHA_MONITOR_PORT") or CDP_PORT)
+    if os.environ.get("HCAPTCHA_MONITOR_PORT"):
+        port = int(os.environ["HCAPTCHA_MONITOR_PORT"])
+    else:
+        port = free_port()
+    print(f"[monitor] starting chrome debug on {port}", flush=True)
     proc = launch_chrome(url, port)
     stop = threading.Event()
     try:
-        wait_for_cdp(port=port, timeout=45.0)
+        targets = wait_for_cdp(port=port, timeout=45.0)
+        print(f"[monitor] cdp up, {len(targets)} targets", flush=True)
         time.sleep(3.5)
-        threading.Thread(target=watch, args=(port, sitekey, webhook, stop), daemon=True).start()
-        print(f"[monitor] captcha window -> {url}", flush=True)
+        threading.Thread(
+            target=watch,
+            args=(port, sitekey, webhook, stop, delay, seed_seconds),
+            daemon=True,
+        ).start()
+        #print(f"[monitor] captcha window -> {url}", flush=True)
         print("[monitor] hit Open challenge if nothing pops", flush=True)
         proc.wait()
         return 0
