@@ -1,4 +1,6 @@
 {
   "sitekey": "",
-  "webhook": ""
+  "webhook": "",
+  "delay": 5,
+  "seed_seconds": 90
 }
